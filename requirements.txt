@@ -1,0 +1,16 @@
+# Core
+python-dotenv
+pyyaml
+loguru
+requests
+
+# RAG-Anything + LightRAG
+raganything[all]
+lightrag-hku
+mineru
+
+# API
+fastapi
+uvicorn[standard]
+pydantic
+python-multipart   

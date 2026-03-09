@@ -1,0 +1,48 @@
+model_name: "rag_anything_ollama_v3"
+description: "RAG-Anything multimodal (LightRAG + MinerU + Ollama, 100% local)"
+
+# ─── Ollama ───────────────────────────────────────────────────────────────────
+ollama:
+  host: "http://localhost:11434"
+  llm_model:    "llama3.1:8b"    # LLM texte
+  vision_model: "llava:7b"       # Vision/VLM pour les images
+  embed_model:  "nomic-embed-text"  # 768 dimensions
+  embed_dim:    768
+
+# ─── Parser (MinerU) ──────────────────────────────────────────────────────────
+parser:
+  backend:      "mineru"   # mineru | docling | paddleocr
+  parse_method: "txt"      # txt (rapide, texte seul) | auto (multimodal) | ocr
+  device:       "cpu"      # cpu | cuda | cuda:0
+  lang:         "fr"       # Langue principale pour l'OCR
+  formula:      true       # Parser les formules mathematiques
+  table:        true       # Parser les tableaux
+  mineru_backend: "pipeline"  # pipeline | hybrid-auto-engine | vlm-auto-engine
+
+# ─── Chemins ──────────────────────────────────────────────────────────────────
+paths:
+  data_dir:    "./donnees rag"              # Documents source
+  output_dir:  "./output"                  # Resultats MinerU (images extraites...)
+  working_dir: "./data/rag_anything_storage"  # Knowledge Graph LightRAG
+
+# ─── Ingestion ────────────────────────────────────────────────────────────────
+ingestion:
+  file_extensions: [".pdf"]  # Extensions a traiter (.pdf, .docx, .pptx...)
+  recursive:   false         # Chercher dans les sous-dossiers
+  max_workers: 1             # Workers paralleles (1 recommande avec Ollama local)
+
+# ─── Requetes ─────────────────────────────────────────────────────────────────
+query:
+  default_mode: "hybrid"     # naive | local | global | hybrid (recommande)
+  vlm_enhanced: null         # null=auto | true=force | false=desactive
+
+# ─── API ──────────────────────────────────────────────────────────────────────
+api:
+  host: "0.0.0.0"
+  port: 8000
+
+# ─── Logging ──────────────────────────────────────────────────────────────────
+logging:
+  level: "INFO"
+  file:  "./logs/rag_anything.log"
+
