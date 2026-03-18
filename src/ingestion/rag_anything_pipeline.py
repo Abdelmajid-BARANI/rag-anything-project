@@ -26,7 +26,74 @@ if str(_venv_scripts) not in os.environ.get("PATH", ""):
 from raganything import RAGAnything, RAGAnythingConfig
 from lightrag.llm.openai import openai_complete_if_cache
 from lightrag.utils import EmbeddingFunc
+from lightrag.prompt import PROMPTS
 import raganything.utils as _rag_utils
+
+# ─────────────────────────────────────────────
+# PATCH: Prompts français stricts pour éviter les hallucinations
+# ─────────────────────────────────────────────
+PROMPTS['rag_response'] = """---Rôle---
+Tu es un assistant expert qui répond aux questions en utilisant EXCLUSIVEMENT les informations du contexte fourni.
+
+---Instructions STRICTES---
+1. LIS ATTENTIVEMENT tout le contexte ci-dessous avant de répondre.
+2. EXTRAIS les informations SPÉCIFIQUES demandées (dates, numéros, noms, valeurs exactes).
+3. Si la question demande une date ou version, CHERCHE les mentions comme "Version en vigueur depuis...", "Modifié par...", ou des dates précises.
+4. NE DIS JAMAIS "consultez le document" ou "l'information est mentionnée dans..." — EXTRAIS l'information directement.
+5. Si l'information N'EST PAS dans le contexte, réponds UNIQUEMENT : "Je n'ai pas trouvé cette information dans les documents." et ARRÊTE-TOI. Ne spécule pas, ne suggère pas de pistes, ne mentionne pas d'autres documents.
+6. NE JAMAIS inventer ou utiliser tes connaissances générales.
+7. Réponds en français de manière concise et directe.
+8. Format de réponse: {response_type}
+
+---Contexte---
+{context_data}
+
+{user_prompt}
+---Réponse---"""
+
+PROMPTS['naive_rag_response'] = """---Instructions STRICTES---
+Réponds à la question en utilisant UNIQUEMENT les informations du **Contexte** ci-dessous.
+Si l'information n'est pas dans le contexte, dis "Je n'ai pas trouvé cette information."
+NE JAMAIS inventer ou utiliser des connaissances externes.
+Réponds en français.
+Format de réponse: {response_type}
+
+---Contexte---
+{content_data}
+
+{user_prompt}
+---Réponse---"""
+
+PROMPTS['fail_response'] = "Je n'ai pas trouvé cette information dans les documents fournis. Veuillez reformuler votre question ou vérifier que le document pertinent a bien été ingéré."
+
+# PATCH: Extraction des mots-clés en français pour une meilleure correspondance
+# Le prompt par défaut génère des mots-clés en anglais, ce qui cause de mauvaises
+# correspondances dans les embeddings de documents français.
+PROMPTS['keywords_extraction'] = """---Rôle---
+Tu es un assistant qui extrait des mots-clés de recherche pour interroger un Knowledge Graph juridique français.
+
+---Instructions---
+1. high_level_keywords : les 2-3 concepts généraux et leurs SYNONYMES proches liés à la question.
+   Inclure des termes sémantiquement proches qui pourraient apparaître dans les documents (ex: si la question parle de "certification de sécurité", inclure aussi "SecNumCloud", "ISO/IEC/27001", "qualification sécurité").
+2. low_level_keywords : les termes spécifiques de la question + les entités juridiques/techniques associées.
+   Inclure les termes exacts de la question ET les termes techniques connexes probables dans des documents juridiques français.
+3. Réponds UNIQUEMENT avec un JSON valide.
+4. NE JAMAIS inventer de fausses références d'articles ou de lois.
+
+---Exemples---
+Question: "Quels formats pour les factures électroniques ?"
+Réponse: {{"high_level_keywords": ["factures électroniques", "formats obligatoires", "transmission"], "low_level_keywords": ["formats factures électroniques", "UBL", "CII", "Factur-X"]}}
+
+Question: "Quelle est la version en vigueur de l'Article 289 ?"
+Réponse: {{"high_level_keywords": ["Article 289", "version en vigueur", "CGI"], "low_level_keywords": ["Article 289", "CGI", "Code Général des Impôts"]}}
+
+Question: "Quelle certification de sécurité peut être exigée pour l'opérateur ?"
+Réponse: {{"high_level_keywords": ["certification sécurité", "opérateur dématérialisation", "qualification"], "low_level_keywords": ["SecNumCloud", "ISO/IEC/27001", "opérateur", "ANSSI", "certification"]}}
+
+---Question à traiter---
+{query}
+
+---Réponse JSON---"""
 
 load_dotenv()
 
@@ -87,7 +154,7 @@ EMBED_MODEL     = os.getenv("OLLAMA_EMBED_MODEL",   "nomic-embed-text")
 EMBED_DIM       = int(os.getenv("OLLAMA_EMBED_DIM", "768"))  # nomic-embed-text = 768d
 
 PARSER         = os.getenv("PARSER",        "mineru")  # mineru | docling | paddleocr
-PARSE_METHOD   = os.getenv("PARSE_METHOD",  "txt")     # auto | ocr | txt
+PARSE_METHOD   = os.getenv("PARSE_METHOD",  "auto")    # auto | ocr | txt
 DEVICE         = os.getenv("MINERU_DEVICE", "cpu")     # cpu | cuda | cuda:0
 
 OUTPUT_DIR  = os.getenv("OUTPUT_DIR",  "./output")
@@ -100,19 +167,60 @@ FAKE_API_KEY = "ollama"  # Ollama n'exige pas de vraie clé
 # 1a. LLM réponses — Llama 3.1:8b via Ollama
 #     Utilisé pour la génération des réponses finales (query)
 # ─────────────────────────────────────────────
+RAG_SYSTEM_PROMPT = """Tu es un assistant expert qui répond aux questions en utilisant UNIQUEMENT le contexte fourni.
+
+RÈGLES STRICTES :
+1. Réponds UNIQUEMENT avec les informations présentes dans le contexte ci-dessous.
+2. Si l'information n'est pas dans le contexte, dis "Je n'ai pas trouvé cette information dans les documents."
+3. NE JAMAIS inventer, supposer ou utiliser des connaissances externes.
+4. Cite les sources (numéros de référence) quand c'est pertinent.
+5. Réponds en français."""
+
 def make_llm_func():
-    """Fonction LLM texte haute qualité (llama3.1:8b) pour la génération de réponses."""
+    """Fonction LLM texte via API native Ollama /api/chat.
+
+    Utilise l'API native Ollama au lieu de l'API compatible OpenAI
+    pour pouvoir passer num_ctx=16384 et garantir que le modèle
+    voit l'intégralité du contexte RAG.
+    """
     async def llm_func(prompt, system_prompt=None, history_messages=[], **kwargs):
         kwargs.pop("hashing_kv", None)
-        return await openai_complete_if_cache(
-            LLM_MODEL,
-            prompt,
-            system_prompt=system_prompt,
-            history_messages=history_messages,
-            api_key=FAKE_API_KEY,
-            base_url=OLLAMA_BASE_URL,
-            **kwargs,
-        )
+        kwargs.pop("response_format", None)
+
+        messages = []
+        if system_prompt:
+            messages.append({"role": "system", "content": system_prompt})
+        for msg in history_messages:
+            messages.append(msg)
+        messages.append({"role": "user", "content": prompt})
+
+        logger.debug(f"=== LLM PROMPT ({sum(len(m['content']) for m in messages)} chars, {len(messages)} msgs) ===")
+
+        payload = {
+            "model": LLM_MODEL,
+            "messages": messages,
+            "stream": False,
+            "options": {
+                "num_ctx": 16384,
+                "temperature": 0.1,
+            },
+        }
+
+        try:
+            loop = asyncio.get_event_loop()
+            response = await loop.run_in_executor(
+                None,
+                lambda: requests.post(
+                    f"{OLLAMA_HOST}/api/chat",
+                    json=payload,
+                    timeout=600,
+                )
+            )
+            response.raise_for_status()
+            return response.json().get("message", {}).get("content", "")
+        except requests.RequestException as e:
+            logger.error(f"Erreur LLM Ollama: {e}")
+            return "Je n'ai pas trouvé cette information dans les documents."
     return llm_func
 
 
@@ -122,18 +230,47 @@ def make_llm_func():
 #     Plus rapide et suffisant pour cette tâche structurée
 # ─────────────────────────────────────────────
 def make_extract_func():
-    """Fonction LLM légère (llama3.1:8b) dédiée à l'extraction d'entités/relations."""
+    """Fonction LLM dédiée à l'extraction d'entités/relations via API native Ollama.
+
+    Utilise /api/chat avec num_ctx=8192 pour garantir que les chunks
+    de texte sont entièrement visibles pendant l'extraction.
+    """
     async def extract_func(prompt, system_prompt=None, history_messages=[], **kwargs):
         kwargs.pop("hashing_kv", None)
-        return await openai_complete_if_cache(
-            EXTRACT_MODEL,
-            prompt,
-            system_prompt=system_prompt,
-            history_messages=history_messages,
-            api_key=FAKE_API_KEY,
-            base_url=OLLAMA_BASE_URL,
-            **kwargs,
-        )
+        kwargs.pop("response_format", None)
+
+        messages = []
+        if system_prompt:
+            messages.append({"role": "system", "content": system_prompt})
+        for msg in history_messages:
+            messages.append(msg)
+        messages.append({"role": "user", "content": prompt})
+
+        payload = {
+            "model": EXTRACT_MODEL,
+            "messages": messages,
+            "stream": False,
+            "options": {
+                "num_ctx": 8192,
+                "temperature": 0.0,
+            },
+        }
+
+        try:
+            loop = asyncio.get_event_loop()
+            response = await loop.run_in_executor(
+                None,
+                lambda: requests.post(
+                    f"{OLLAMA_HOST}/api/chat",
+                    json=payload,
+                    timeout=600,
+                )
+            )
+            response.raise_for_status()
+            return response.json().get("message", {}).get("content", "")
+        except requests.RequestException as e:
+            logger.error(f"Erreur extraction Ollama: {e}")
+            return ""
     return extract_func
 
 
@@ -266,13 +403,13 @@ def get_rag_instance(working_dir: str = WORKING_DIR) -> RAGAnything:
         "default_llm_timeout": 600,         # 10 min par appel LLM (worker = 2x = 20 min)
         "default_embedding_timeout": 120,   # 2 min par batch d'embeddings
 
-        # Chunks plus petits → moins de tokens par appel LLM → plus rapide
-        "chunk_token_size": 400,
-        "chunk_overlap_token_size": 40,
+        # Chunks larges pour capturer des paragraphes juridiques complets
+        "chunk_token_size": 1200,
+        "chunk_overlap_token_size": 150,
 
-        # Extraction d'entités — limiter la charge
-        "entity_extract_max_gleaning": 0,   # 0 = pas de passe supplémentaire
-        "max_extract_input_tokens": 4000,   # réduire le contexte envoyé au LLM
+        # Extraction d'entités — 1 passe supplémentaire pour meilleur rappel
+        "entity_extract_max_gleaning": 1,
+        "max_extract_input_tokens": 6000,
 
         # Concurrence — 1 seul LLM en parallèle (Ollama local ne peut pas en faire plus)
         "llm_model_max_async": 1,
@@ -482,18 +619,26 @@ async def query(
     logger.debug(f"LLM réponse: {LLM_MODEL} | LLM extraction: {EXTRACT_MODEL}")
 
     rag = get_rag_instance(working_dir)
+    await rag._ensure_lightrag_initialized()
 
-    # Passer llama3.1:8b via model_func pour la génération de la réponse finale.
-    # L'instance RAG utilise llama3.1:8b (make_extract_func) pour l'extraction
-    # d'entités, mais ici on surcharge avec le modèle haute qualité.
+    # Budget tokens large grâce à num_ctx=16384 via API native Ollama.
+    # ~10000 tokens de contexte RAG + ~1500 tokens prompt/réponse = ~11500 < 16384 ✓
+    if vlm_enhanced is None:
+        vlm_enhanced = False
+
     kwargs: Dict[str, Any] = {
-        "mode": mode,
+        "top_k": 15,                    # plus de voisins graphe pour meilleur rappel
+        "chunk_top_k": 10,              # plus de chunks pour contexte riche
+        "max_entity_tokens": 1500,      # entités larges pour capturer toutes les infos
+        "max_relation_tokens": 800,     # relations larges
+        "max_total_tokens": 10000,      # contexte large (num_ctx=16384 le permet)
+        "enable_rerank": False,
         "model_func": make_llm_func(),
+        "vlm_enhanced": vlm_enhanced,
     }
-    if vlm_enhanced is not None:
-        kwargs["vlm_enhanced"] = vlm_enhanced
 
-    result = await rag.aquery(question, **kwargs)
+    result = await rag.aquery(question, mode=mode, **kwargs)
+    result = result or "Je n'ai pas trouvé cette information dans les documents."
     logger.success(f"Réponse générée ({len(result)} caractères)")
     return result
 
@@ -522,6 +667,7 @@ async def query_multimodal(
     logger.info(f"Requête multimodale (mode={mode}): {question[:60]}...")
 
     rag = get_rag_instance(working_dir)
+    await rag._ensure_lightrag_initialized()
     result = await rag.aquery_with_multimodal(
         question,
         multimodal_content=multimodal_content,
