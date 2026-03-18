@@ -22,7 +22,7 @@ parser:
 
 # ─── Chemins ──────────────────────────────────────────────────────────────────
 paths:
-  data_dir:    "./donnees rag"              # Documents source
+  data_dir:    "./donnees_rag"             # Documents source
   output_dir:  "./output"                  # Resultats MinerU (images extraites...)
   working_dir: "./data/rag_anything_storage"  # Knowledge Graph LightRAG
 

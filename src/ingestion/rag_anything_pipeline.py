@@ -158,7 +158,7 @@ PARSE_METHOD   = os.getenv("PARSE_METHOD",  "auto")    # auto | ocr | txt
 DEVICE         = os.getenv("MINERU_DEVICE", "cpu")     # cpu | cuda | cuda:0
 
 OUTPUT_DIR  = os.getenv("OUTPUT_DIR",  "./output")
-DATA_DIR    = "./données rag"
+DATA_DIR    = "./donnees_rag"
 WORKING_DIR = "./data/rag_anything_storage"
 FAKE_API_KEY = "ollama"  # Ollama n'exige pas de vraie clé
 
