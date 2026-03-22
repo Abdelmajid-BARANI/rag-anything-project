@@ -9,7 +9,9 @@ Fonctionnalités:
   - 100% local : LLM + Vision + Embeddings via Ollama
 """
 import asyncio
+import json
 import os
+import re
 import sys
 import requests
 import numpy as np
@@ -33,26 +35,30 @@ import raganything.utils as _rag_utils
 # PATCH: Prompts français stricts pour éviter les hallucinations
 # ─────────────────────────────────────────────
 PROMPTS['rag_response'] = """---Rôle---
-Tu es un assistant expert qui répond aux questions en utilisant EXCLUSIVEMENT les informations du contexte fourni.
+Tu es un assistant juridique et fiscal qui répond aux questions en utilisant EXCLUSIVEMENT les informations du contexte fourni.
 
 ---Instructions STRICTES---
 1. LIS ATTENTIVEMENT tout le contexte ci-dessous avant de répondre.
-2. EXTRAIS les informations SPÉCIFIQUES demandées (dates, numéros, noms, valeurs exactes).
+2. EXTRAIS les informations SPÉCIFIQUES demandées (dates, numéros d'articles, noms, valeurs exactes).
 3. Si la question demande une date ou version, CHERCHE les mentions comme "Version en vigueur depuis...", "Modifié par...", ou des dates précises.
 4. NE DIS JAMAIS "consultez le document" ou "l'information est mentionnée dans..." — EXTRAIS l'information directement.
-5. Si l'information N'EST PAS dans le contexte, réponds UNIQUEMENT : "Je n'ai pas trouvé cette information dans les documents." et ARRÊTE-TOI. Ne spécule pas, ne suggère pas de pistes, ne mentionne pas d'autres documents.
-6. NE JAMAIS inventer ou utiliser tes connaissances générales.
-7. Réponds en français de manière concise et directe.
-8. Format de réponse: {response_type}
+5. Si l'information N'EST PAS dans le contexte, réponds UNIQUEMENT : "Je n'ai pas trouvé cette information dans les documents." et ARRÊTE-TOI. Ne spécule pas.
+6. NE JAMAIS inventer, reformuler, ou utiliser tes connaissances générales. Cite les passages EXACTS du contexte.
+7. Pour chaque affirmation, cite entre guillemets «» le passage exact du contexte qui la supporte.
+8. Si tu ne peux pas citer un passage exact pour une affirmation, NE L'INCLUS PAS dans ta réponse.
+9. Réponds en français de manière concise et directe.
+10. Format de réponse: {response_type}
 
 ---Contexte---
 {context_data}
 
 {user_prompt}
----Réponse---"""
+---Réponse (avec citations exactes du contexte)---"""
 
 PROMPTS['naive_rag_response'] = """---Instructions STRICTES---
 Réponds à la question en utilisant UNIQUEMENT les informations du **Contexte** ci-dessous.
+Pour chaque affirmation, cite entre guillemets «» le passage exact du contexte qui la supporte.
+Si tu ne peux pas citer un passage exact, NE FAIS PAS cette affirmation.
 Si l'information n'est pas dans le contexte, dis "Je n'ai pas trouvé cette information."
 NE JAMAIS inventer ou utiliser des connaissances externes.
 Réponds en français.
@@ -62,7 +68,7 @@ Format de réponse: {response_type}
 {content_data}
 
 {user_prompt}
----Réponse---"""
+---Réponse (avec citations exactes)---"""
 
 PROMPTS['fail_response'] = "Je n'ai pas trouvé cette information dans les documents fournis. Veuillez reformuler votre question ou vérifier que le document pertinent a bien été ingéré."
 
@@ -70,25 +76,21 @@ PROMPTS['fail_response'] = "Je n'ai pas trouvé cette information dans les docum
 # Le prompt par défaut génère des mots-clés en anglais, ce qui cause de mauvaises
 # correspondances dans les embeddings de documents français.
 PROMPTS['keywords_extraction'] = """---Rôle---
-Tu es un assistant qui extrait des mots-clés de recherche pour interroger un Knowledge Graph juridique français.
+Tu es un assistant qui extrait des mots-clés de recherche pour interroger un Knowledge Graph de documents fiscaux et juridiques français (CGI, BOI, annexes).
 
 ---Instructions---
-1. high_level_keywords : les 2-3 concepts généraux et leurs SYNONYMES proches liés à la question.
-   Inclure des termes sémantiquement proches qui pourraient apparaître dans les documents (ex: si la question parle de "certification de sécurité", inclure aussi "SecNumCloud", "ISO/IEC/27001", "qualification sécurité").
-2. low_level_keywords : les termes spécifiques de la question + les entités juridiques/techniques associées.
-   Inclure les termes exacts de la question ET les termes techniques connexes probables dans des documents juridiques français.
+1. high_level_keywords : 2-4 concepts généraux EXACTEMENT tels qu'ils apparaissent dans les textes juridiques fiscaux français.
+   ATTENTION : utilise le vocabulaire juridique précis du domaine fiscal (ex: "audit de conformité", "opérateur de plateforme de dématérialisation partenaire", "piste d'audit fiable").
+2. low_level_keywords : 3-6 entités précises, numéros d'articles, périodes, obligations mentionnées dans la question.
+   Inclure les numéros d'articles CGI/BOI et les termes techniques exacts du droit fiscal français.
+   INCLURE AUSSI les synonymes et variantes orthographiques pertinents.
 3. Réponds UNIQUEMENT avec un JSON valide.
 4. NE JAMAIS inventer de fausses références d'articles ou de lois.
+5. TOUJOURS utiliser le vocabulaire du droit fiscal et de la facturation électronique française.
 
----Exemples---
+---Exemple---
 Question: "Quels formats pour les factures électroniques ?"
-Réponse: {{"high_level_keywords": ["factures électroniques", "formats obligatoires", "transmission"], "low_level_keywords": ["formats factures électroniques", "UBL", "CII", "Factur-X"]}}
-
-Question: "Quelle est la version en vigueur de l'Article 289 ?"
-Réponse: {{"high_level_keywords": ["Article 289", "version en vigueur", "CGI"], "low_level_keywords": ["Article 289", "CGI", "Code Général des Impôts"]}}
-
-Question: "Quelle certification de sécurité peut être exigée pour l'opérateur ?"
-Réponse: {{"high_level_keywords": ["certification sécurité", "opérateur dématérialisation", "qualification"], "low_level_keywords": ["SecNumCloud", "ISO/IEC/27001", "opérateur", "ANSSI", "certification"]}}
+Réponse: {{"high_level_keywords": ["factures électroniques", "formats structurés", "interopérabilité", "dématérialisation"], "low_level_keywords": ["UBL", "CII", "Factur-X", "PDF/A3", "article 41 septies C", "portail public de facturation", "format structuré"]}}
 
 ---Question à traiter---
 {query}
@@ -106,19 +108,43 @@ _REAL_MULTIMODAL_TYPES = {"image", "table", "equation"}
 _original_separate_content = _rag_utils.separate_content
 
 def _filtered_separate_content(content_list):
-    """Filtre les éléments structurels (header/footer/list/page_number) pour
+    """Filtre les éléments structurels (header/footer/page_number) pour
     éviter des appels LLM inutiles sur du contenu non analysable, tout en
-    conservant leur contenu textuel."""
+    conservant leur contenu textuel.
+
+    Gère spécifiquement les éléments de type "list" en aplatissant leurs
+    list_items en un bloc de texte unique, évitant ainsi la perte du contenu
+    (bug original : conversion en type "text" sans champ "text" = contenu perdu).
+    """
     filtered = []
     for item in content_list:
         item_type = item.get("type", "text")
         # Les vrais multimodaux restent tels quels
         if item_type in _REAL_MULTIMODAL_TYPES:
             filtered.append(item)
-        # Tout le reste est forcé en type "text"
+        # Les listes sont aplaties en texte (CORRECTION BUG : list_items → text)
+        elif item_type == "list":
+            list_items = item.get("list_items", [])
+            if isinstance(list_items, list):
+                combined = "\n".join(str(x).strip() for x in list_items if x)
+            else:
+                combined = str(list_items)
+            if combined.strip():
+                filtered.append({
+                    "type": "text",
+                    "text": combined,
+                    "page_idx": item.get("page_idx", 0),
+                })
+        # Tout le reste est forcé en type "text" avec conservation du contenu
         else:
             new_item = dict(item)
             new_item["type"] = "text"
+            # S'assurer que le champ "text" existe pour les types non-standard
+            if "text" not in new_item:
+                for field in ("content", "html", "raw"):
+                    if field in new_item:
+                        new_item["text"] = new_item[field]
+                        break
             filtered.append(new_item)
     return _original_separate_content(filtered)
 
@@ -147,15 +173,15 @@ if not os.environ.get("HF_ENDPOINT"):
 # ─────────────────────────────────────────────
 OLLAMA_HOST     = os.getenv("OLLAMA_HOST",          "http://localhost:11434")
 OLLAMA_BASE_URL = f"{OLLAMA_HOST}/v1"               # endpoint compatible OpenAI
-LLM_MODEL       = os.getenv("OLLAMA_LLM_MODEL",     "llama3.1:8b")   # réponses
-EXTRACT_MODEL   = os.getenv("OLLAMA_EXTRACT_MODEL", "llama3.1:8b")   # extraction entités
+LLM_MODEL       = os.getenv("OLLAMA_LLM_MODEL",     "mistral-nemo:12b")  # réponses (meilleur FR + anti-hallucination)
+EXTRACT_MODEL   = os.getenv("OLLAMA_EXTRACT_MODEL", "qwen2.5:7b")       # extraction entités (rapide + structuré)
 VISION_MODEL    = os.getenv("OLLAMA_VISION_MODEL",  "llava:7b")
 EMBED_MODEL     = os.getenv("OLLAMA_EMBED_MODEL",   "nomic-embed-text")
 EMBED_DIM       = int(os.getenv("OLLAMA_EMBED_DIM", "768"))  # nomic-embed-text = 768d
 
-PARSER         = os.getenv("PARSER",        "mineru")  # mineru | docling | paddleocr
-PARSE_METHOD   = os.getenv("PARSE_METHOD",  "auto")    # auto | ocr | txt
-DEVICE         = os.getenv("MINERU_DEVICE", "cpu")     # cpu | cuda | cuda:0
+PARSER         = os.getenv("PARSER",        "docling")  # docling | mineru | paddleocr
+PARSE_METHOD   = os.getenv("PARSE_METHOD",  "auto")     # auto | ocr | txt
+DEVICE         = os.getenv("MINERU_DEVICE", "cuda")     # cuda | cpu | cuda:0
 
 OUTPUT_DIR  = os.getenv("OUTPUT_DIR",  "./output")
 DATA_DIR    = "./donnees_rag"
@@ -167,14 +193,16 @@ FAKE_API_KEY = "ollama"  # Ollama n'exige pas de vraie clé
 # 1a. LLM réponses — Llama 3.1:8b via Ollama
 #     Utilisé pour la génération des réponses finales (query)
 # ─────────────────────────────────────────────
-RAG_SYSTEM_PROMPT = """Tu es un assistant expert qui répond aux questions en utilisant UNIQUEMENT le contexte fourni.
+RAG_SYSTEM_PROMPT = """Tu es un assistant juridique et fiscal expert qui répond aux questions en utilisant UNIQUEMENT le contexte fourni.
 
 RÈGLES STRICTES :
 1. Réponds UNIQUEMENT avec les informations présentes dans le contexte ci-dessous.
-2. Si l'information n'est pas dans le contexte, dis "Je n'ai pas trouvé cette information dans les documents."
-3. NE JAMAIS inventer, supposer ou utiliser des connaissances externes.
-4. Cite les sources (numéros de référence) quand c'est pertinent.
-5. Réponds en français."""
+2. Pour chaque affirmation, CITE le passage exact du contexte entre guillemets «».
+3. Si tu ne peux pas citer un passage exact pour une affirmation, NE FAIS PAS cette affirmation.
+4. Si l'information n'est pas dans le contexte, dis \"Je n'ai pas trouvé cette information dans les documents.\"
+5. NE JAMAIS inventer, supposer ou utiliser des connaissances externes.
+6. Cite les références précises (numéros d'articles, dates, textes de loi) quand c'est pertinent.
+7. Réponds en français de manière concise et directe."""
 
 def make_llm_func():
     """Fonction LLM texte via API native Ollama /api/chat.
@@ -383,16 +411,14 @@ def get_rag_instance(working_dir: str = WORKING_DIR) -> RAGAnything:
       PARSER         : mineru | docling | paddleocr  (défaut: mineru)
       MINERU_DEVICE  : cpu | cuda | cuda:0  (défaut: cpu)
     """
-    # En mode txt, MinerU ne produit que du texte + éléments structurels
-    # (header, footer, page_number, list) — pas de vraies images/tables/équations.
-    # Activer le multimodal sur ces éléments cause des erreurs inutiles.
+    # Données texte + tableaux uniquement — vision désactivée
     enable_multimodal = PARSE_METHOD != "txt"
 
     config = RAGAnythingConfig(
         working_dir=working_dir,
         parser=PARSER,
         parse_method=PARSE_METHOD,
-        enable_image_processing=enable_multimodal,
+        enable_image_processing=False,          # vision désactivée (données texte/tableaux)
         enable_table_processing=enable_multimodal,
         enable_equation_processing=enable_multimodal,
     )
@@ -403,12 +429,12 @@ def get_rag_instance(working_dir: str = WORKING_DIR) -> RAGAnything:
         "default_llm_timeout": 600,         # 10 min par appel LLM (worker = 2x = 20 min)
         "default_embedding_timeout": 120,   # 2 min par batch d'embeddings
 
-        # Chunks larges pour capturer des paragraphes juridiques complets
+        # Chunks de taille moyenne avec fort chevauchement pour ne rien perdre
         "chunk_token_size": 1200,
-        "chunk_overlap_token_size": 150,
+        "chunk_overlap_token_size": 300,   # doublé: évite de couper les infos aux frontières
 
-        # Extraction d'entités — 1 passe supplémentaire pour meilleur rappel
-        "entity_extract_max_gleaning": 1,
+        # Extraction d'entités — 2 passes pour meilleur rappel sur les docs juridiques
+        "entity_extract_max_gleaning": 2,
         "max_extract_input_tokens": 6000,
 
         # Concurrence — 1 seul LLM en parallèle (Ollama local ne peut pas en faire plus)
@@ -417,11 +443,11 @@ def get_rag_instance(working_dir: str = WORKING_DIR) -> RAGAnything:
         "max_parallel_insert": 1,
     }
 
-    # llm_model_func = make_extract_func() → llama3.1:8b
+    # llm_model_func = make_extract_func() → qwen2.5:7b
     #   LightRAG utilise ce LLM pour extract_entities() pendant l'ingestion.
-    #   llama3.1:8b est suffisant pour cette tâche structurée.
+    #   qwen2.5:7b est rapide et précis pour cette tâche structurée.
     #
-    # La génération des réponses finales (query) utilise llama3.1:8b,
+    # La génération des réponses finales (query) utilise mistral-nemo:12b,
     # passé via QueryParam(model_func=make_llm_func()) dans query().
     return RAGAnything(
         config=config,
@@ -627,20 +653,167 @@ async def query(
         vlm_enhanced = False
 
     kwargs: Dict[str, Any] = {
-        "top_k": 15,                    # plus de voisins graphe pour meilleur rappel
-        "chunk_top_k": 10,              # plus de chunks pour contexte riche
-        "max_entity_tokens": 1500,      # entités larges pour capturer toutes les infos
-        "max_relation_tokens": 800,     # relations larges
-        "max_total_tokens": 10000,      # contexte large (num_ctx=16384 le permet)
-        "enable_rerank": False,
+        "top_k": 25,                    # voisins graphe élargis pour meilleur rappel
+        "chunk_top_k": 15,              # plus de chunks pour ne rien manquer
+        "max_entity_tokens": 2000,      # entités larges pour capturer toutes les infos
+        "max_relation_tokens": 1000,    # relations larges
+        "max_total_tokens": 12000,      # contexte large (mistral-nemo supporte 128K)
         "model_func": make_llm_func(),
         "vlm_enhanced": vlm_enhanced,
     }
 
     result = await rag.aquery(question, mode=mode, **kwargs)
+
+    _not_found = "Je n'ai pas trouvé"
+    if not result or result.strip().startswith(_not_found):
+        logger.warning(f"Mode '{mode}' n'a pas trouvé de réponse — fallback recherche textuelle.")
+        result = await _keyword_fallback(question, working_dir)
+
     result = result or "Je n'ai pas trouvé cette information dans les documents."
     logger.success(f"Réponse générée ({len(result)} caractères)")
     return result
+
+
+# ─────────────────────────────────────────────
+# Fallback : recherche textuelle directe sur les chunks
+# Contourne la dépendance au LLM pour l'extraction de mots-clés
+# (utile quand le LLM extrait de mauvais mots-clés en mode hybrid/local)
+# ─────────────────────────────────────────────
+_FR_STOPWORDS = {
+    "sur", "quelle", "quels", "quelles", "quel", "pour", "une", "un",
+    "la", "le", "les", "de", "du", "des", "et", "en", "dans", "par",
+    "est", "qui", "que", "avec", "sans", "mais", "donc", "comme", "plus",
+    "cette", "ces", "tout", "tous", "toute", "toutes", "aussi", "très",
+    "lors", "selon", "entre", "après", "avant", "depuis", "pendant",
+}
+
+def _extract_all_texts_from_parse_cache(working_dir: str) -> List[str]:
+    """
+    Extrait TOUT le texte du parse_cache MinerU, y compris les éléments
+    de type 'list' (list_items) qui n'ont pas été indexés dans LightRAG
+    à cause du bug de parsing initial.
+
+    Retourne une liste de blocs de texte (un par item content_list).
+    """
+    cache_path = Path(working_dir) / "kv_store_parse_cache.json"
+    if not cache_path.exists():
+        return []
+
+    with open(cache_path, "r", encoding="utf-8") as f:
+        parse_cache = json.load(f)
+
+    texts: List[str] = []
+    for entry in parse_cache.values():
+        for item in entry.get("content_list", []):
+            item_type = item.get("type", "")
+
+            if item_type == "list":
+                # Aplatir les items de liste en texte
+                list_items = item.get("list_items", [])
+                if isinstance(list_items, list):
+                    combined = "\n".join(str(x).strip() for x in list_items if x)
+                else:
+                    combined = str(list_items)
+                if combined.strip():
+                    texts.append(combined.strip())
+
+            elif item_type == "text":
+                text = item.get("text", "").strip()
+                if text:
+                    texts.append(text)
+
+    return texts
+
+
+async def _keyword_fallback(question: str, working_dir: str) -> str:
+    """
+    Recherche textuelle BM25-like sur TOUTES les sources disponibles :
+    - kv_store_text_chunks.json  (chunks indexés dans LightRAG)
+    - kv_store_parse_cache.json  (contenu MinerU complet, incl. list_items manquants)
+
+    Extrait des extraits ciblés autour des mots-clés et les passe au LLM.
+    """
+    # ── 1. Mots-clés de la question ───────────────────────────────────────────
+    words = re.findall(r"[a-zA-ZÀ-ÿ]{4,}", question.lower())
+    keywords = [w for w in words if w not in _FR_STOPWORDS]
+    if not keywords:
+        return ""
+    logger.debug(f"Fallback mots-clés: {keywords}")
+
+    # ── 2. Collecter tous les blocs de texte disponibles ──────────────────────
+    all_texts: List[str] = []
+
+    # Source A : chunks indexés (textes complets)
+    chunks_path = Path(working_dir) / "kv_store_text_chunks.json"
+    if chunks_path.exists():
+        with open(chunks_path, "r", encoding="utf-8") as f:
+            chunks = json.load(f)
+        all_texts.extend(c.get("content", "") for c in chunks.values() if c.get("content"))
+
+    # Source B : parse_cache complet (inclut list_items non indexés)
+    all_texts.extend(_extract_all_texts_from_parse_cache(working_dir))
+
+    if not all_texts:
+        return ""
+
+    # ── 3. Scorer par correspondance (distinct keywords matched, puis fréquence) ─
+    # Utiliser d'abord le nombre de mots-clés DISTINCTS trouvés (comme IDF :
+    # les termes rares ont le même poids que les termes fréquents) puis la
+    # fréquence totale pour départager les égalités.
+    scored: List[tuple] = []
+    for text in all_texts:
+        text_lower = text.lower()
+        distinct = sum(1 for kw in keywords if kw in text_lower)
+        total    = sum(text_lower.count(kw) for kw in keywords)
+        if distinct > 0:
+            scored.append((distinct, total, text))
+
+    if not scored:
+        logger.warning("Fallback : aucun texte correspondant aux mots-clés.")
+        return ""
+
+    scored.sort(key=lambda x: (x[0], x[1]), reverse=True)
+    logger.info(f"Fallback : {len(scored)} blocs scorés, distinct max={scored[0][0]}")
+
+    # ── 4. Extraire les paragraphes/phrases pertinents ────────────────────────
+    snippets: List[str] = []
+    seen: set = set()
+
+    for _, _, text in scored[:8]:
+        # Découper en paragraphes/phrases
+        paras = [p.strip() for p in re.split(r"\n{2,}|\n(?=\d+[°\.]|\$\d)", text) if p.strip()]
+        for para in paras:
+            para_lower = para.lower()
+            if any(kw in para_lower for kw in keywords) and para not in seen and len(para) > 20:
+                snippets.append(para)
+                seen.add(para)
+            if len(snippets) >= 15:
+                break
+        if len(snippets) >= 15:
+            break
+
+    if not snippets:
+        snippets = [text[:600] for _, _, text in scored[:4]]
+
+    context = "\n\n".join(snippets)
+    logger.info(f"Fallback : {len(snippets)} extraits, {len(context)} caractères")
+
+    # ── 5. Appel LLM avec prompt générique ───────────────────────────────────
+    prompt = (
+        f"Réponds à la question en utilisant uniquement les extraits de documents ci-dessous.\n"
+        f"Réponds en français. Si l'information est absente des extraits, "
+        f"dis uniquement : Je n'ai pas trouvé cette information dans les documents.\n\n"
+        f"---Extraits---\n{context}\n\n"
+        f"---Question---\n{question}\n\n"
+        f"---Réponse---"
+    )
+
+    try:
+        llm = make_llm_func()
+        return await llm(prompt, system_prompt=None)
+    except Exception as e:
+        logger.error(f"Erreur LLM fallback: {e}")
+        return ""
 
 
 # ─────────────────────────────────────────────
@@ -681,11 +854,10 @@ async def query_multimodal(
 # 10. Vérifications
 # ─────────────────────────────────────────────
 def check_ollama_models() -> Dict[str, Any]:
-    """Vérifie que les 4 modèles Ollama nécessaires sont disponibles."""
+    """Vérifie que les 3 modèles Ollama nécessaires sont disponibles (vision désactivée)."""
     required = {
         "llm (réponses)": LLM_MODEL,
         "extract (entités)": EXTRACT_MODEL,
-        "vision": VISION_MODEL,
         "embedding": EMBED_MODEL,
     }
     status: Dict[str, Any] = {}
@@ -724,24 +896,23 @@ if __name__ == "__main__":
     print(f"  Parser       : {PARSER}")
     print(f"  Méthode      : {PARSE_METHOD}")
     print(f"  LLM          : {LLM_MODEL}")
-    print(f"  Vision       : {VISION_MODEL}")
+    print(f"  Vision       : désactivée (données texte/tableaux)")
     print(f"  Embeddings   : {EMBED_MODEL} ({EMBED_DIM}d)")
     print(f"  Working dir  : {WORKING_DIR}")
 
     print("\nVérification des modèles Ollama...")
     status = check_ollama_models()
-    all_ready = True
+    missing = []
     for role, info in status.items():
         icon = "✅" if info.get("available") else "❌"
         print(f"  {icon} {role}: {info['model']}")
         if not info.get("available"):
-            all_ready = False
+            missing.append(info['model'])
 
-    if not all_ready:
-        print("\n⚠️  Modèles manquants. Installez-les avec :")
-        print(f"     ollama pull {LLM_MODEL}")
-        print(f"     ollama pull {VISION_MODEL}")
-        print(f"     ollama pull {EMBED_MODEL}")
+    if missing:
+        print("\n❌ Modèles manquants. Installez-les avec :")
+        for m in missing:
+            print(f"     ollama pull {m}")
         exit(1)
 
     print("\nDémarrage de l'ingestion...")

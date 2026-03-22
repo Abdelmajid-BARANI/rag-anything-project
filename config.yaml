@@ -1,24 +1,24 @@
-model_name: "rag_anything_ollama_v3"
-description: "RAG-Anything multimodal (LightRAG + MinerU + Ollama, 100% local)"
+model_name: "rag_anything_docling_v5"
+description: "RAG-Anything multimodal (LightRAG + Docling + Ollama, optimisé FR)"
 
 # ─── Ollama ───────────────────────────────────────────────────────────────────
 ollama:
   host: "http://localhost:11434"
-  llm_model:    "llama3.1:8b"    # LLM texte (8b = meilleure qualité de réponses)
-  vision_model: "llava:7b"       # Vision/VLM pour les images
-  embed_model:  "nomic-embed-text"  # 768 dimensions
+  llm_model:    "mistral-nemo:12b"    # Meilleur LLM français, anti-hallucination
+  extract_model: "qwen2.5:7b"         # Extraction entités (rapide + structuré)
+  vision_model: null                   # Vision désactivée (données texte/tableaux uniquement)
+  embed_model:  "nomic-embed-text"     # 768 dimensions, bon multilingue
   embed_dim:    768
-  num_ctx:      16384              # Fenêtre de contexte (critique pour RAG)
+  num_ctx:      16384                  # Fenêtre de contexte (mistral-nemo supporte 128K)
 
 # ─── Parser (MinerU) ──────────────────────────────────────────────────────────
 parser:
-  backend:      "mineru"   # mineru | docling | paddleocr
-  parse_method: "auto"      # txt (rapide, texte seul) | auto (multimodal) | ocr
-  device:       "cpu"      # cpu | cuda | cuda:0
-  lang:         "fr"       # Langue principale pour l'OCR
-  formula:      true       # Parser les formules mathematiques
-  table:        true       # Parser les tableaux
-  mineru_backend: "pipeline"  # pipeline | hybrid-auto-engine | vlm-auto-engine
+  backend:      "docling"   # docling (meilleur pour tableaux FR) | mineru | paddleocr
+  parse_method: "auto"       # auto (multimodal) | txt (rapide, texte seul) | ocr
+  device:       "cuda"       # cuda | cpu | cuda:0
+  lang:         "fr"         # Langue principale pour l'OCR
+  formula:      true         # Parser les formules mathematiques
+  table:        true         # Parser les tableaux
 
 # ─── Chemins ──────────────────────────────────────────────────────────────────
 paths:
@@ -36,6 +36,9 @@ ingestion:
 query:
   default_mode: "hybrid"     # naive | local | global | hybrid (recommande)
   vlm_enhanced: null         # null=auto | true=force | false=desactive
+  top_k: 25                  # voisins graphe
+  chunk_top_k: 15            # chunks vectoriels
+  max_total_tokens: 12000    # budget contexte
 
 # ─── API ──────────────────────────────────────────────────────────────────────
 api:

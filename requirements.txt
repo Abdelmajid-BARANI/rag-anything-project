@@ -7,7 +7,7 @@ requests
 # RAG-Anything + LightRAG
 raganything[all]
 lightrag-hku
-mineru
+docling
 
 # API
 fastapi
