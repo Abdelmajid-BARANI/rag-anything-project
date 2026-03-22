@@ -279,7 +279,7 @@ def make_extract_func():
             "messages": messages,
             "stream": False,
             "options": {
-                "num_ctx": 8192,
+                "num_ctx": 4096,   # 4096 suffit pour l'extraction + plus rapide que 8192
                 "temperature": 0.0,
             },
         }
@@ -291,7 +291,7 @@ def make_extract_func():
                 lambda: requests.post(
                     f"{OLLAMA_HOST}/api/chat",
                     json=payload,
-                    timeout=600,
+                    timeout=300,   # 5 min max par chunk (qwen2.5:7b sur T4 << 5 min)
                 )
             )
             response.raise_for_status()
@@ -429,13 +429,13 @@ def get_rag_instance(working_dir: str = WORKING_DIR) -> RAGAnything:
         "default_llm_timeout": 600,         # 10 min par appel LLM (worker = 2x = 20 min)
         "default_embedding_timeout": 120,   # 2 min par batch d'embeddings
 
-        # Chunks de taille moyenne avec fort chevauchement pour ne rien perdre
-        "chunk_token_size": 1200,
-        "chunk_overlap_token_size": 300,   # doublé: évite de couper les infos aux frontières
+        # Chunks adaptés à num_ctx=4096 de l'extraction
+        "chunk_token_size": 800,            # réduit : tient dans num_ctx=4096 avec le prompt
+        "chunk_overlap_token_size": 200,    # overlap proportionnel
 
-        # Extraction d'entités — 2 passes pour meilleur rappel sur les docs juridiques
-        "entity_extract_max_gleaning": 2,
-        "max_extract_input_tokens": 6000,
+        # Extraction d'entités — 1 seule passe (2 passes = 2x le risque de timeout)
+        "entity_extract_max_gleaning": 1,
+        "max_extract_input_tokens": 3500,  # chunk 800 + prompt ~500 + marge < 4096
 
         # Concurrence — 1 seul LLM en parallèle (Ollama local ne peut pas en faire plus)
         "llm_model_max_async": 1,

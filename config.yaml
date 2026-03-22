@@ -9,7 +9,8 @@ ollama:
   vision_model: null                   # Vision désactivée (données texte/tableaux uniquement)
   embed_model:  "nomic-embed-text"     # 768 dimensions, bon multilingue
   embed_dim:    768
-  num_ctx:      16384                  # Fenêtre de contexte (mistral-nemo supporte 128K)
+  num_ctx_llm:  16384                  # Fenêtre LLM réponses (mistral-nemo supporte 128K)
+  num_ctx_extract: 4096               # Fenêtre extraction (qwen2.5:7b — rapide sur T4)
 
 # ─── Parser (MinerU) ──────────────────────────────────────────────────────────
 parser:
