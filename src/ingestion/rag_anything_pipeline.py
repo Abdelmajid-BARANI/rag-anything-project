@@ -279,7 +279,7 @@ def make_extract_func():
             "messages": messages,
             "stream": False,
             "options": {
-                "num_ctx": 4096,   # 4096 suffit pour l'extraction + plus rapide que 8192
+                "num_ctx": 8192,   # prompt extraction LightRAG ≈ 4500 tok + chunk → 8192 requis
                 "temperature": 0.0,
             },
         }
@@ -435,7 +435,7 @@ def get_rag_instance(working_dir: str = WORKING_DIR) -> RAGAnything:
 
         # Extraction d'entités — 1 seule passe (2 passes = 2x le risque de timeout)
         "entity_extract_max_gleaning": 1,
-        "max_extract_input_tokens": 3500,  # chunk 800 + prompt ~500 + marge < 4096
+        "max_extract_input_tokens": 7000,  # prompt LightRAG ≈ 4500 tok + chunk 800 < 8192
 
         # Concurrence — 1 seul LLM en parallèle (Ollama local ne peut pas en faire plus)
         "llm_model_max_async": 1,
@@ -555,6 +555,20 @@ async def ingest_all_documents(
 
     Path(output_dir).mkdir(parents=True, exist_ok=True)
     Path(working_dir).mkdir(parents=True, exist_ok=True)
+
+    # Libérer la VRAM occupée par le LLM réponses (mistral-nemo:12b ~7.5GB)
+    # avant l'ingestion qui n'utilise que qwen2.5:7b.
+    # Sans cela, les deux modèles tenteraient de cohabiter en VRAM (12GB > budget T4)
+    # et Ollama basculerait qwen2.5:7b sur CPU → timeout.
+    try:
+        requests.post(
+            f"{OLLAMA_HOST}/api/generate",
+            json={"model": LLM_MODEL, "keep_alive": 0},
+            timeout=30,
+        )
+        logger.info(f"VRAM libérée : {LLM_MODEL} déchargé avant ingestion.")
+    except requests.RequestException:
+        pass  # Ollama pas encore démarré ou modèle pas encore chargé — pas grave
 
     logger.info(f"Ingestion du dossier: {data_dir}")
     logger.info(f"Parser: {PARSER}, Méthode: {PARSE_METHOD}, Extensions: {file_extensions}")
