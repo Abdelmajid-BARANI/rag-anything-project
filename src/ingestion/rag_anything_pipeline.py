@@ -556,10 +556,10 @@ async def ingest_all_documents(
     Path(output_dir).mkdir(parents=True, exist_ok=True)
     Path(working_dir).mkdir(parents=True, exist_ok=True)
 
-    # Libérer la VRAM occupée par le LLM réponses (mistral-nemo:12b ~7.5GB)
-    # avant l'ingestion qui n'utilise que qwen2.5:7b.
-    # Sans cela, les deux modèles tenteraient de cohabiter en VRAM (12GB > budget T4)
-    # et Ollama basculerait qwen2.5:7b sur CPU → timeout.
+    # 1) Libérer la VRAM occupée par le LLM réponses (mistral-nemo:12b ~7.5GB)
+    #    avant l'ingestion qui n'utilise que qwen2.5:7b.
+    #    Sans cela, les deux modèles tenteraient de cohabiter en VRAM (12GB > budget T4)
+    #    et Ollama basculerait qwen2.5:7b sur CPU → timeout.
     try:
         requests.post(
             f"{OLLAMA_HOST}/api/generate",
@@ -569,6 +569,23 @@ async def ingest_all_documents(
         logger.info(f"VRAM libérée : {LLM_MODEL} déchargé avant ingestion.")
     except requests.RequestException:
         pass  # Ollama pas encore démarré ou modèle pas encore chargé — pas grave
+
+    # 2) Préchauffer qwen2.5:7b pour éviter le timeout de cold start sur le premier chunk
+    #    (le premier appel charge le modèle en VRAM, ce qui peut prendre >300s sans warmup)
+    logger.info(f"Préchauffage de {EXTRACT_MODEL}...")
+    try:
+        resp = requests.post(
+            f"{OLLAMA_HOST}/api/generate",
+            json={"model": EXTRACT_MODEL, "prompt": "ok", "stream": False,
+                  "options": {"num_ctx": 8192}},
+            timeout=600,
+        )
+        if resp.status_code == 200:
+            logger.info(f"{EXTRACT_MODEL} chargé en VRAM, prêt pour l'extraction.")
+        else:
+            logger.warning(f"Warmup {EXTRACT_MODEL} : statut {resp.status_code}")
+    except requests.RequestException as e:
+        logger.warning(f"Warmup impossible ({e}) — le premier chunk peut être lent.")
 
     logger.info(f"Ingestion du dossier: {data_dir}")
     logger.info(f"Parser: {PARSER}, Méthode: {PARSE_METHOD}, Extensions: {file_extensions}")
