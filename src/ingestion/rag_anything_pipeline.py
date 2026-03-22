@@ -278,6 +278,7 @@ def make_extract_func():
             "model": EXTRACT_MODEL,
             "messages": messages,
             "stream": False,
+            "keep_alive": "2h",    # maintenir en VRAM pendant toute l'ingestion (défaut Ollama = 5min)
             "options": {
                 "num_ctx": 8192,   # prompt extraction LightRAG ≈ 4500 tok + chunk → 8192 requis
                 "temperature": 0.0,
@@ -577,6 +578,7 @@ async def ingest_all_documents(
         resp = requests.post(
             f"{OLLAMA_HOST}/api/generate",
             json={"model": EXTRACT_MODEL, "prompt": "ok", "stream": False,
+                  "keep_alive": "2h",   # rester en VRAM pendant toute l'ingestion
                   "options": {"num_ctx": 8192}},
             timeout=600,
         )
